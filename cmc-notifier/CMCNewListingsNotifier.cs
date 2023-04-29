@@ -13,19 +13,21 @@ using Microsoft.Extensions.Logging;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using Newtonsoft.Json;
+using Twilio;
+using Twilio.Rest.Api.V2010.Account;
 
 namespace cmc_notifier
 {
     public static class CMCNewListingsNotifier
     {
         [FunctionName("CMCNewListingsNotifier")]
-        public static async Task Run([TimerTrigger("0 */5 * * * *")]TimerInfo myTimer, ILogger log)
+        public static async Task Run([TimerTrigger("0 */10 * * * *")]TimerInfo myTimer, ILogger log)
         {
             var result = (await GetLatestListingsAsync());
             var tokensToSend = result.Data.Where(x => x.Date_Added > DateTime.UtcNow.AddMinutes(-120)).ToList();
             if (tokensToSend.Any())
             {
-                await SendEmailAsync(tokensToSend, log);
+                await SendSMSMessagesAsync(tokensToSend, log);
             }
             else
             {
@@ -33,22 +35,13 @@ namespace cmc_notifier
             }
         }
 
-        public static async Task SendEmailAsync(List<Cryptocurrency> tokensToSend, ILogger log)
+        public static async Task SendSMSMessagesAsync(List<Cryptocurrency> tokensToSend, ILogger log)
         {
-            SmtpClient client = new SmtpClient("smtp.gmail.com", 587);
-            client.UseDefaultCredentials = false;
-            client.EnableSsl = true;
-            string username = Environment.GetEnvironmentVariable("SMTP_USERNAME");
-            string password = Environment.GetEnvironmentVariable("SMTP_PASSWORD");
-            log.LogInformation($"Username: {username}");
-            log.LogInformation($"Password: {password}");
-            client.Credentials = new NetworkCredential(username, password);
+            var accountSid = Environment.GetEnvironmentVariable("TWILIO_ACCOUNT_SID");
+            var authToken = Environment.GetEnvironmentVariable("TWILIO_AUTH_TOKEN");
+            TwilioClient.Init(accountSid, authToken);
 
-            MailMessage message = new MailMessage();
-            message.From = new MailAddress(username);
-            message.To.Add(new MailAddress("tansdj@gmail.com"));
-            message.Subject = "Coin Market Cap: New Listings";
-            message.Body = $"The following listings have been added in the last 2 hours:\n\n";
+            var recipients = Environment.GetEnvironmentVariable("SMS_RECEIVERS").Split(';').ToList();
 
             var previousNotifications = await GetPreviousNotificationsAsync();
 
@@ -73,27 +66,43 @@ namespace cmc_notifier
 
             foreach (var token in tokensToSend)
             {
-                log.LogInformation($"Printing Token: {token.Name}");
-                message.Body += "==============================================================\n";
-                message.Body += $"{token.Name} ({token.Symbol} - www.coinmarketcap.com/currencies/{token.Slug})\n";
-                if (token.Platform != null)
+                var message = BuildNotificationMessage(token);
+                foreach(var recipient in recipients)
                 {
-                    message.Body += $"Available on {token.Platform.Name}\n";
-                }
-                else
-                {
-                    message.Body += "Platform not specified\n";
-                }
+                    var messageResult = await MessageResource.CreateAsync(
+                        body: message,
+                        from: new Twilio.Types.PhoneNumber($"{Environment.GetEnvironmentVariable("SMS_SENDER")}"),
+                        to: new Twilio.Types.PhoneNumber($"{recipient}")
+                    );
 
-                message.Body += $"Price ${token.Quote.USD.Price}\n";
-                message.Body += $"1h Change: {token.Quote.USD.Percent_Change_1h} %\n";
-                message.Body += $"24h Change {token.Quote.USD.Percent_Change_24h} %\n";
-                message.Body += "==============================================================\n";
-                message.Body += "\n";
+                    log.LogInformation($"SMS message processed for token {token.Slug} & recipient {recipient} with status {messageResult.Status.ToString()}");
+                    if (messageResult.ErrorMessage != null)
+                    {
+                        log.LogError($"SMS message failed with status code: {messageResult.ErrorCode} - {messageResult.ErrorMessage}");
+                    }
+                }
+                
+            }
+        }
+
+        public static string BuildNotificationMessage(Cryptocurrency token)
+        {
+            var message = string.Empty;
+            message += "Hi! A new token has recently been added to CoinMarketCap.\n";
+            message += $"Token: {token.Name} ({token.Symbol})\n";
+            if (token.Platform != null)
+            {
+                message += $"Platform: {token.Platform.Name}\n";
+            }
+            else
+            {
+                message += "Platform: Not specified\n";
             }
 
-            client.Send(message);
-            log.LogInformation("Email sent successfully.");
+            message += $"Price: ${token.Quote.USD.Price}\n";
+            message += $"24h Change: {token.Quote.USD.Percent_Change_24h}%\n";
+            message += $"Visit www.coinmarketcap.com/currencies/{token.Slug} for more information.";
+            return message;
         }
 
         public static async Task<ListingLatestResponse> GetLatestListingsAsync()
