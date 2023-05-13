@@ -41,7 +41,8 @@ namespace cmc_notifier
             var authToken = Environment.GetEnvironmentVariable("TWILIO_AUTH_TOKEN");
             TwilioClient.Init(accountSid, authToken);
 
-            var recipients = Environment.GetEnvironmentVariable("SMS_RECEIVERS").Split(';').ToList();
+            var ethRecipients = Environment.GetEnvironmentVariable("ETH_SMS_RECEIVERS").Split(';').ToList();
+            var bnbRecipients = Environment.GetEnvironmentVariable("BNB_SMS_RECEIVERS").Split(';').ToList();
 
             var previousNotifications = await GetPreviousNotificationsAsync();
 
@@ -66,22 +67,43 @@ namespace cmc_notifier
 
             foreach (var token in tokensToSend)
             {
-                var message = BuildNotificationMessage(token);
-                foreach(var recipient in recipients)
+                if (token.Platform.Name != null)
                 {
-                    var messageResult = await MessageResource.CreateAsync(
-                        body: message,
-                        from: new Twilio.Types.PhoneNumber($"{Environment.GetEnvironmentVariable("SMS_SENDER")}"),
-                        to: new Twilio.Types.PhoneNumber($"{recipient}")
-                    );
-
-                    log.LogInformation($"SMS message processed for token {token.Slug} & recipient {recipient} with status {messageResult.Status.ToString()}");
-                    if (messageResult.ErrorMessage != null)
+                    var message = BuildNotificationMessage(token);
+                    if (token.Platform.Name.Contains("BNB"))
                     {
-                        log.LogError($"SMS message failed with status code: {messageResult.ErrorCode} - {messageResult.ErrorMessage}");
+                        foreach (var recipient in bnbRecipients)
+                        {
+                            await SendSmsToRecipientAsync(recipient, token, message, log);
+                        }
                     }
+
+                    if (token.Platform.Name.Contains("Ethereum"))
+                    {
+                        foreach (var recipient in ethRecipients)
+                        {
+                            await SendSmsToRecipientAsync(recipient, token, message, log);
+                        }
+                    }
+                } else
+                {
+                    log.LogInformation($"Platform not specified for token {token.Name}, ignoring.");
                 }
-                
+            }
+        }
+
+        public static async Task SendSmsToRecipientAsync (string recipient, Cryptocurrency token, string message, ILogger log)
+        {
+            var messageResult = await MessageResource.CreateAsync(
+                                body: message,
+                                from: new Twilio.Types.PhoneNumber($"{Environment.GetEnvironmentVariable("SMS_SENDER")}"),
+                                to: new Twilio.Types.PhoneNumber($"{recipient}")
+                            );
+
+            log.LogInformation($"SMS message processed for token {token.Slug} & recipient {recipient} with status {messageResult.Status.ToString()}");
+            if (messageResult.ErrorMessage != null)
+            {
+                log.LogError($"SMS message failed with status code: {messageResult.ErrorCode} - {messageResult.ErrorMessage}");
             }
         }
 
